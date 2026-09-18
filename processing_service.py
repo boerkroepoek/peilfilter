@@ -141,7 +141,8 @@ class GroundwaterProcessingService:
     def process_uploaded_files(
         self,
         uploaded_files: list[UploadedCsvFile],
-    ) -> list"""Verwerk meerdere bestanden en isoleer fouten per bestand."""
+    ) -> list:
+        """Verwerk meerdere bestanden en isoleer fouten per bestand."""
 
         return [
             self.process_uploaded_file(uploaded_file)
