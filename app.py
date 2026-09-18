@@ -177,7 +177,8 @@ def build_processing_signature(
 
 def build_uploaded_models(
     uploaded_files: Sequence[Any],
-) -> list"""Converteer Streamlit-uploads naar interne datamodellen."""
+) -> list:
+    """Converteer Streamlit-uploads naar interne datamodellen."""
 
     return [
         UploadedCsvFile(
