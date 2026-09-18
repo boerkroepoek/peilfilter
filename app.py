@@ -217,7 +217,8 @@ def create_failed_processing_result(
 def process_uploaded_models(
     uploaded_models: Sequence[UploadedCsvFile],
     processing_service: GroundwaterProcessingService,
-) -> list"""
+) -> list:
+    """
     Verwerk alle uploads en isoleer fouten per bestand.
 
     Een onverwachte fout in één bestand voorkomt niet dat de
