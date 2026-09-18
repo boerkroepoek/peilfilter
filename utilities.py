@@ -103,7 +103,8 @@ def validate_input_file(
 def parse_csv_line(
     line: str,
     delimiter: str,
-) -> list"""Parse één CSV-regel met ondersteuning voor gequote velden."""
+) -> list:
+    """Parse één CSV-regel met ondersteuning voor gequote velden."""
 
     if not line:
         return []
