@@ -4,14 +4,17 @@ import hashlib
 import io
 import logging
 import zipfile
+from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
 from config import DEFAULT_CONFIG, AppConfig
 from models import (
+    ExcludedPeriod,
     GroundwaterStatistics,
     ProcessingResult,
     UploadedCsvFile,
@@ -24,6 +27,7 @@ LOGGER = logging.getLogger(__name__)
 
 PROCESSING_RESULTS_STATE_KEY = "processing_results"
 PROCESSING_SIGNATURE_STATE_KEY = "processing_signature"
+EXCLUDED_PERIODS_STATE_KEY = "excluded_periods"
 
 MONTH_NAMES: dict[int, str] = {
     1: "Januari",
@@ -53,8 +57,9 @@ def configure_page() -> None:
 
     st.title("💧 Grondwateranalyse")
     st.caption(
-        "Analyseer grondwatermetingen, detecteer uitschieters "
-        "en genereer een PDF-rapport met GHG- en GLG-proxywaarden."
+        "Analyseer grondwatermetingen, sluit desgewenst periodes uit, "
+        "detecteer uitschieters en genereer een PDF-rapport met "
+        "GHG- en GLG-proxywaarden."
     )
 
 
@@ -135,6 +140,9 @@ def initialize_session_state() -> None:
     if PROCESSING_SIGNATURE_STATE_KEY not in st.session_state:
         st.session_state[PROCESSING_SIGNATURE_STATE_KEY] = None
 
+    if EXCLUDED_PERIODS_STATE_KEY not in st.session_state:
+        st.session_state[EXCLUDED_PERIODS_STATE_KEY] = []
+
 
 def create_content_hash(content: bytes) -> str:
     """Maak een stabiele SHA-256-hash van bestandsinhoud."""
@@ -145,7 +153,12 @@ def create_content_hash(content: bytes) -> str:
 def build_processing_signature(
     uploaded_files: Sequence[Any],
     config: AppConfig,
-) -> tuple[tuple[tuple[str, int, str], ...], tuple[object, ...]]:
+    excluded_periods: tuple[ExcludedPeriod, ...] = (),
+) -> tuple[
+    tuple[tuple[str, int, str], ...],
+    tuple[object, ...],
+    tuple[tuple[str, str], ...],
+]:
     """
     Maak een handtekening van uploads en analyse-instellingen.
 
@@ -172,7 +185,213 @@ def build_processing_signature(
         config.expected_measurement_column,
     )
 
-    return file_signature, config_signature
+    period_signature = tuple(
+        (
+            period.start_date.strftime("%Y-%m-%d"),
+            period.end_date.strftime("%Y-%m-%d"),
+        )
+        for period in excluded_periods
+    )
+
+    return file_signature, config_signature, period_signature
+
+
+@st.cache_data(show_spinner=False)
+def load_preview_data(
+    filename: str,
+    content: bytes,
+    config: AppConfig,
+) -> pd.DataFrame:
+    """Parse en cache een upload voor de grafiekselectie."""
+
+    processing_service = GroundwaterProcessingService(config)
+    _, dataframe = processing_service.load_uploaded_data(
+        UploadedCsvFile(filename=filename, content=content)
+    )
+    return dataframe
+
+
+def chart_selection_period(selection: Any) -> tuple[date, date] | None:
+    """Converteer een Altair-x-asselectie naar inclusieve kalenderdatums."""
+
+    if not isinstance(selection, dict):
+        return None
+
+    bounds = selection.get("x")
+    if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+        return None
+
+    parsed_dates: list[date] = []
+    for bound in bounds:
+        if isinstance(bound, (int, float)):
+            unit = "ms" if abs(bound) >= 100_000_000_000 else "s"
+            timestamp = pd.to_datetime(bound, unit=unit)
+        else:
+            timestamp = pd.Timestamp(bound)
+
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.tz_convert(None)
+        parsed_dates.append(timestamp.date())
+
+    return min(parsed_dates), max(parsed_dates)
+
+
+def render_excluded_period_controls(
+    uploaded_files: Sequence[Any],
+    config: AppConfig,
+) -> tuple[ExcludedPeriod, ...]:
+    """Toon handmatige en grafische invoer voor uitsluitingsperiodes."""
+
+    stored_periods: list[tuple[date, date]] = st.session_state[
+        EXCLUDED_PERIODS_STATE_KEY
+    ]
+
+    with st.expander(
+        "Periodes buiten beschouwing laten",
+        expanded=bool(stored_periods),
+    ):
+        st.caption(
+            "Periodes zijn inclusief begin- en einddatum. "
+            "Metingen blijven zichtbaar in de grafiek, maar tellen "
+            "niet mee voor uitschieterfiltering en GHG/GLG."
+        )
+
+        manual_column1, manual_column2 = st.columns(2)
+        start_date = manual_column1.date_input(
+            "Begindatum",
+            value=date.today(),
+            key="excluded_period_start",
+        )
+        end_date = manual_column2.date_input(
+            "Einddatum",
+            value=date.today(),
+            key="excluded_period_end",
+        )
+
+        if st.button(
+            "Handmatige periode toevoegen",
+            key="add_manual_excluded_period",
+        ):
+            if start_date > end_date:
+                st.error("De begindatum moet op of vóór de einddatum liggen.")
+            else:
+                period = (start_date, end_date)
+                if period not in stored_periods:
+                    stored_periods.append(period)
+
+        if uploaded_files:
+            st.markdown("**Of selecteer een periode in de grafiek**")
+            st.caption(
+                "Sleep over het gewenste tijdvak en voeg de selectie "
+                "daarna toe."
+            )
+            file_index = st.selectbox(
+                "Meetreeks voor selectie",
+                options=range(len(uploaded_files)),
+                format_func=lambda index: uploaded_files[index].name,
+                key="excluded_period_preview_file",
+            )
+            selected_upload = uploaded_files[file_index]
+
+            try:
+                preview_dataframe = load_preview_data(
+                    filename=selected_upload.name,
+                    content=selected_upload.getvalue(),
+                    config=config,
+                )
+                date_column = config.expected_date_column
+                measurement_column = config.expected_measurement_column
+                brush = alt.selection_interval(
+                    name="exclude_period",
+                    encodings=["x"],
+                )
+                chart = (
+                    alt.Chart(preview_dataframe)
+                    .mark_line(
+                        point=alt.OverlayMarkDef(size=35),
+                        color="#1f77b4",
+                    )
+                    .encode(
+                        x=alt.X(
+                            f"{date_column}:T",
+                            title="Datum",
+                        ),
+                        y=alt.Y(
+                            f"{measurement_column}:Q",
+                            title="Waterstand (m NAP)",
+                        ),
+                        tooltip=[
+                            alt.Tooltip(f"{date_column}:T", title="Datum"),
+                            alt.Tooltip(
+                                f"{measurement_column}:Q",
+                                title="Waterstand (m NAP)",
+                                format=".3f",
+                            ),
+                        ],
+                    )
+                    .add_params(brush)
+                    .properties(height=300)
+                )
+                chart_event = st.altair_chart(
+                    chart,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="exclude_period",
+                    key=f"excluded_period_chart_{file_index}",
+                )
+                chart_state = chart_event.get("selection", {})
+                chart_period = chart_selection_period(
+                    chart_state.get("exclude_period")
+                    if isinstance(chart_state, dict)
+                    else None
+                )
+
+                if chart_period is not None:
+                    st.caption(
+                        "Geselecteerd: "
+                        f"{chart_period[0]:%d-%m-%Y} t/m "
+                        f"{chart_period[1]:%d-%m-%Y}"
+                    )
+
+                if st.button(
+                    "Geselecteerde periode toevoegen",
+                    disabled=chart_period is None,
+                    key=f"add_chart_excluded_period_{file_index}",
+                ) and chart_period is not None:
+                    if chart_period not in stored_periods:
+                        stored_periods.append(chart_period)
+            except Exception as exc:
+                st.warning(
+                    f"De meetreeks kan niet voor selectie worden getoond: {exc}"
+                )
+        else:
+            st.info(
+                "Upload eerst een CSV om periodes via een grafiek te selecteren."
+            )
+
+        if stored_periods:
+            st.markdown("**Uitgesloten periodes**")
+            for index, (period_start, period_end) in enumerate(
+                stored_periods
+            ):
+                period_column, remove_column = st.columns([5, 1])
+                period_column.write(
+                    f"{period_start:%d-%m-%Y} t/m {period_end:%d-%m-%Y}"
+                )
+                if remove_column.button(
+                    "Verwijderen",
+                    key=f"remove_excluded_period_{index}",
+                ):
+                    stored_periods.pop(index)
+                    st.rerun()
+
+    return tuple(
+        ExcludedPeriod(
+            start_date=pd.Timestamp(period_start),
+            end_date=pd.Timestamp(period_end),
+        )
+        for period_start, period_end in stored_periods
+    )
 
 
 def build_uploaded_models(
@@ -217,6 +436,7 @@ def create_failed_processing_result(
 def process_uploaded_models(
     uploaded_models: Sequence[UploadedCsvFile],
     processing_service: GroundwaterProcessingService,
+    excluded_periods: tuple[ExcludedPeriod, ...] = (),
 ) -> list:
     """
     Verwerk alle uploads en isoleer fouten per bestand.
@@ -245,7 +465,8 @@ def process_uploaded_models(
 
             try:
                 result = processing_service.process_uploaded_file(
-                    uploaded_model
+                    uploaded_model,
+                    excluded_periods=excluded_periods,
                 )
             except Exception as exception:
                 LOGGER.exception(
@@ -401,6 +622,10 @@ def render_summary_metrics(
     """Toon de belangrijkste analyseresultaten."""
 
     column1, column2, column3, column4 = st.columns(4)
+    excluded_count = (
+        statistics.excluded_period_measurement_count
+        + statistics.removed_outlier_count
+    )
 
     column1.metric(
         "Metingen voor filtering",
@@ -411,8 +636,8 @@ def render_summary_metrics(
         "Metingen na filtering",
         statistics.filtered_measurement_count,
         delta=(
-            -statistics.removed_outlier_count
-            if statistics.removed_outlier_count
+            -excluded_count
+            if excluded_count
             else None
         ),
         delta_color="inverse",
@@ -427,6 +652,19 @@ def render_summary_metrics(
         "GLG-proxy",
         format_optional_nap(statistics.glg),
     )
+
+    if statistics.excluded_periods:
+        periods = ", ".join(
+            (
+                f"{period.start_date:%d-%m-%Y} t/m "
+                f"{period.end_date:%d-%m-%Y}"
+            )
+            for period in statistics.excluded_periods
+        )
+        st.caption(
+            f"{statistics.excluded_period_measurement_count} meting(en) "
+            f"buiten de analyse door uitgesloten periode(s): {periods}."
+        )
 
 
 def render_data_tab(
@@ -548,6 +786,8 @@ def render_summary_tab(
         "Eigenschap": [
             "Bestandsnaam",
             "Filternummer",
+            "Metingen uitgesloten op periode",
+            "Uitgesloten periodes",
             "GHG-proxy",
             "GLG-proxy",
             "Referentiejaren",
@@ -557,6 +797,18 @@ def render_summary_tab(
         "Waarde": [
             result.source_filename,
             result.filternummer or "Onbekend",
+            str(statistics.excluded_period_measurement_count),
+            (
+                "; ".join(
+                    (
+                        f"{period.start_date:%d-%m-%Y} t/m "
+                        f"{period.end_date:%d-%m-%Y}"
+                    )
+                    for period in statistics.excluded_periods
+                )
+                if statistics.excluded_periods
+                else "Geen"
+            ),
             format_optional_nap(statistics.ghg),
             format_optional_nap(statistics.glg),
             (
@@ -790,6 +1042,10 @@ def main() -> None:
     current_signature = build_processing_signature(
         uploaded_files=uploaded_files,
         config=config,
+        excluded_periods=render_excluded_period_controls(
+            uploaded_files=uploaded_files,
+            config=config,
+        ),
     )
 
     stored_signature = st.session_state[
@@ -819,6 +1075,15 @@ def main() -> None:
         results = process_uploaded_models(
             uploaded_models=uploaded_models,
             processing_service=processing_service,
+            excluded_periods=tuple(
+                ExcludedPeriod(
+                    start_date=pd.Timestamp(period_start),
+                    end_date=pd.Timestamp(period_end),
+                )
+                for period_start, period_end in st.session_state[
+                    EXCLUDED_PERIODS_STATE_KEY
+                ]
+            ),
         )
 
         st.session_state[

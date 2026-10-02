@@ -60,6 +60,22 @@ class ChartService:
             zorder=2,
         )
 
+        original_x_limits = axis.get_xlim()
+        for index, period in enumerate(statistics.excluded_periods):
+            axis.axvspan(
+                period.start_date,
+                period.end_date + pd.Timedelta(days=1),
+                color="#ffb74d",
+                alpha=0.22,
+                label=(
+                    "Buiten beschouwing gelaten"
+                    if index == 0
+                    else None
+                ),
+                zorder=0,
+            )
+        axis.set_xlim(original_x_limits)
+
         if statistics.removed_outliers:
             outlier_dates = [
                 outlier.measurement_date

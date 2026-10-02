@@ -27,6 +27,14 @@ class OutlierRecord:
 
 
 @dataclass(frozen=True)
+class ExcludedPeriod:
+    """Een inclusieve periode die buiten de analyse blijft."""
+
+    start_date: pd.Timestamp
+    end_date: pd.Timestamp
+
+
+@dataclass(frozen=True)
 class OutlierFilterResult:
     """Resultaat van de uitschieterfiltering."""
 
@@ -48,6 +56,8 @@ class GroundwaterStatistics:
     removed_outliers: tuple[OutlierRecord, ...]
     original_measurement_count: int = 0
     filtered_measurement_count: int = 0
+    excluded_periods: tuple[ExcludedPeriod, ...] = ()
+    excluded_period_measurement_count: int = 0
 
     @property
     def removed_outlier_count(self) -> int:

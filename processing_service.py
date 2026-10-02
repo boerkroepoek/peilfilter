@@ -4,11 +4,18 @@ import logging
 import tempfile
 from pathlib import Path
 
+import pandas as pd
+
 from analysis_service import GroundwaterAnalysisService
 from chart_service import ChartService
 from config import AppConfig
 from csv_service import CsvService
-from models import ProcessingResult, UploadedCsvFile
+from models import (
+    CsvMetadata,
+    ExcludedPeriod,
+    ProcessingResult,
+    UploadedCsvFile,
+)
 from pdf_service import PdfService
 
 
@@ -36,6 +43,7 @@ class GroundwaterProcessingService:
     def process_uploaded_file(
         self,
         uploaded_file: UploadedCsvFile,
+        excluded_periods: tuple[ExcludedPeriod, ...] = (),
     ) -> ProcessingResult:
         """Verwerk één browserupload tot analyse en PDF."""
 
@@ -57,48 +65,26 @@ class GroundwaterProcessingService:
         )
 
         try:
-            with tempfile.TemporaryDirectory(
-                prefix="grondwater_streamlit_"
-            ) as temporary_directory:
-                temporary_path = (
-                    Path(temporary_directory) / safe_filename
+            metadata, dataframe = self.load_uploaded_data(uploaded_file)
+            statistics, filtered_dataframe = (
+                self.analysis_service.calculate_statistics(
+                    dataframe,
+                    excluded_periods=excluded_periods,
                 )
+            )
 
-                temporary_path.write_bytes(
-                    uploaded_file.content
-                )
+            plot_png = self.chart_service.create_png(
+                dataframe=dataframe,
+                filternummer=metadata.filternummer,
+                statistics=statistics,
+            )
 
-                metadata = (
-                    self.csv_service.find_metadata_and_header(
-                        temporary_path
-                    )
-                )
-
-                dataframe = (
-                    self.csv_service.load_and_prepare_data(
-                        csv_file=temporary_path,
-                        metadata=metadata,
-                    )
-                )
-
-                statistics, filtered_dataframe = (
-                    self.analysis_service.calculate_statistics(
-                        dataframe
-                    )
-                )
-
-                plot_png = self.chart_service.create_png(
-                    dataframe=dataframe,
-                    filternummer=metadata.filternummer,
-                    statistics=statistics,
-                )
-
-                pdf_bytes = self.pdf_service.create_pdf_bytes(
-                    plot_png=plot_png,
-                    filternummer=metadata.filternummer,
-                    dataframe=dataframe,
-                    statistics=statistics,
-                )
+            pdf_bytes = self.pdf_service.create_pdf_bytes(
+                plot_png=plot_png,
+                filternummer=metadata.filternummer,
+                dataframe=dataframe,
+                statistics=statistics,
+            )
 
             output_filename = (
                 f"{Path(safe_filename).stem}"
@@ -108,6 +94,8 @@ class GroundwaterProcessingService:
             message = (
                 f"Rapport aangemaakt. "
                 f"Geldige metingen: {len(dataframe)}. "
+                f"Uitgesloten wegens periodes: "
+                f"{statistics.excluded_period_measurement_count}. "
                 f"Verwijderde uitschieters: "
                 f"{statistics.removed_outlier_count}."
             )
@@ -138,13 +126,42 @@ class GroundwaterProcessingService:
                 message=str(exc),
             )
 
+    def load_uploaded_data(
+        self,
+        uploaded_file: UploadedCsvFile,
+    ) -> tuple[CsvMetadata, pd.DataFrame]:
+        """Parse een upload voor preview of verdere verwerking."""
+
+        safe_filename = self.sanitize_filename(uploaded_file.filename)
+        if not uploaded_file.content:
+            raise ValueError("Het geüploade bestand is leeg.")
+
+        with tempfile.TemporaryDirectory(
+            prefix="grondwater_streamlit_"
+        ) as temporary_directory:
+            temporary_path = Path(temporary_directory) / safe_filename
+            temporary_path.write_bytes(uploaded_file.content)
+            metadata = self.csv_service.find_metadata_and_header(
+                temporary_path
+            )
+            dataframe = self.csv_service.load_and_prepare_data(
+                csv_file=temporary_path,
+                metadata=metadata,
+            )
+
+        return metadata, dataframe
+
     def process_uploaded_files(
         self,
         uploaded_files: list[UploadedCsvFile],
+        excluded_periods: tuple[ExcludedPeriod, ...] = (),
     ) -> list:
         """Verwerk meerdere bestanden en isoleer fouten per bestand."""
 
         return [
-            self.process_uploaded_file(uploaded_file)
+            self.process_uploaded_file(
+                uploaded_file,
+                excluded_periods=excluded_periods,
+            )
             for uploaded_file in uploaded_files
         ]

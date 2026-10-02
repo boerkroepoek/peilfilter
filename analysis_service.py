@@ -7,6 +7,7 @@ import pandas as pd
 
 from config import AppConfig
 from models import (
+    ExcludedPeriod,
     GroundwaterStatistics,
     OutlierFilterResult,
     OutlierRecord,
@@ -280,6 +281,8 @@ class GroundwaterAnalysisService:
         filtered_measurement_count: int = 0,
         removed_outliers: tuple[OutlierRecord, ...] = (),
         excluded_years: tuple[int, ...] = (),
+        excluded_periods: tuple[ExcludedPeriod, ...] = (),
+        excluded_period_measurement_count: int = 0,
     ) -> GroundwaterStatistics:
         """Maak een leeg statistiekresultaat."""
 
@@ -294,19 +297,70 @@ class GroundwaterAnalysisService:
             removed_outliers=removed_outliers,
             original_measurement_count=original_measurement_count,
             filtered_measurement_count=filtered_measurement_count,
+            excluded_periods=excluded_periods,
+            excluded_period_measurement_count=(
+                excluded_period_measurement_count
+            ),
         )
 
     def calculate_statistics(
         self,
         dataframe: pd.DataFrame,
+        excluded_periods: tuple[ExcludedPeriod, ...] = (),
     ) -> tuple[GroundwaterStatistics, pd.DataFrame]:
         """Bereken GHG- en GLG-proxywaarden per hydrologisch jaar."""
 
         if dataframe is None or dataframe.empty:
-            return self.empty_statistics(), pd.DataFrame()
+            return (
+                self.empty_statistics(excluded_periods=excluded_periods),
+                pd.DataFrame(),
+            )
 
         original_measurement_count = len(dataframe)
-        calculation_df = self.add_hydrological_year(dataframe)
+        calculation_df = dataframe.copy()
+        date_column = self.config.expected_date_column
+
+        if excluded_periods:
+            if date_column not in calculation_df.columns:
+                raise ValueError(
+                    f"Datumkolom '{date_column}' ontbreekt."
+                )
+
+            dates = calculation_df[date_column]
+            if not pd.api.types.is_datetime64_any_dtype(dates):
+                raise TypeError(
+                    f"Kolom '{date_column}' moet datetime-waarden bevatten."
+                )
+            if dates.isna().any():
+                raise ValueError(
+                    f"Kolom '{date_column}' bevat lege datums."
+                )
+
+            excluded_mask = pd.Series(
+                False,
+                index=calculation_df.index,
+                dtype=bool,
+            )
+            for period in excluded_periods:
+                start_date = pd.Timestamp(period.start_date).normalize()
+                end_date = pd.Timestamp(period.end_date).normalize()
+                if start_date > end_date:
+                    raise ValueError(
+                        "De begindatum van een uitgesloten periode "
+                        "valt na de einddatum."
+                    )
+                excluded_mask |= dates.dt.normalize().between(
+                    start_date,
+                    end_date,
+                    inclusive="both",
+                )
+
+            calculation_df = calculation_df.loc[~excluded_mask].copy()
+            excluded_period_measurement_count = int(excluded_mask.sum())
+        else:
+            excluded_period_measurement_count = 0
+
+        calculation_df = self.add_hydrological_year(calculation_df)
 
         filter_result = (
             self.remove_outliers_per_hydrological_year(
@@ -328,6 +382,10 @@ class GroundwaterAnalysisService:
                         filtered_measurement_count
                     ),
                     removed_outliers=removed_outliers,
+                    excluded_periods=excluded_periods,
+                    excluded_period_measurement_count=(
+                        excluded_period_measurement_count
+                    ),
                 ),
                 filtered_df,
             )
@@ -371,6 +429,10 @@ class GroundwaterAnalysisService:
                     ),
                     removed_outliers=removed_outliers,
                     excluded_years=excluded_years,
+                    excluded_periods=excluded_periods,
+                    excluded_period_measurement_count=(
+                        excluded_period_measurement_count
+                    ),
                 ),
                 filtered_df,
             )
@@ -400,6 +462,10 @@ class GroundwaterAnalysisService:
             removed_outliers=removed_outliers,
             original_measurement_count=original_measurement_count,
             filtered_measurement_count=filtered_measurement_count,
+            excluded_periods=excluded_periods,
+            excluded_period_measurement_count=(
+                excluded_period_measurement_count
+            ),
         )
 
         return statistics, filtered_df

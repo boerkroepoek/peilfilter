@@ -142,8 +142,12 @@ class PdfService:
                 str(len(dataframe)),
             ),
             (
-                "Aantal metingen na uitschieterfiltering",
+                "Aantal metingen na filtering",
                 str(statistics.filtered_measurement_count),
+            ),
+            (
+                "Metingen in uitgesloten periodes",
+                str(statistics.excluded_period_measurement_count),
             ),
             (
                 "Aantal verwijderde uitschieters",
@@ -168,6 +172,18 @@ class PdfService:
                 ),
             ),
         ]
+
+        if statistics.excluded_periods:
+            summary_rows.extend(
+                (
+                    "Uitgesloten periode",
+                    (
+                        f"{period.start_date:%d-%m-%Y} t/m "
+                        f"{period.end_date:%d-%m-%Y}"
+                    ),
+                )
+                for period in statistics.excluded_periods
+            )
 
         if statistics.ghg is not None:
             summary_rows.append(
@@ -199,6 +215,10 @@ class PdfService:
         value_width = pdf.usable_width - label_width
 
         for label, value in summary_rows:
+            if pdf.get_y() + 7 > pdf.h - pdf.b_margin:
+                pdf.add_page()
+                pdf.section_title("Samenvatting (vervolg)")
+
             pdf.set_font("Helvetica", "B", 9)
 
             pdf.cell(
@@ -529,7 +549,9 @@ class PdfService:
 
         note = (
             "De weergegeven GHG- en GLG-waarden zijn "
-            "proxywaarden. Per hydrologisch jaar worden metingen "
+            "proxywaarden. Metingen binnen de opgegeven "
+            "uitgesloten periodes worden niet meegenomen. Per "
+            "hydrologisch jaar worden metingen "
             "verwijderd waarvan de absolute afwijking ten opzichte "
             "van het jaargemiddelde groter is dan "
             f"{self.config.outlier_threshold_meters:.2f} meter. "
