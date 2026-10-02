@@ -4,6 +4,7 @@ import hashlib
 import io
 import logging
 import zipfile
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
@@ -214,11 +215,28 @@ def load_preview_data(
 def chart_selection_period(selection: Any) -> tuple[date, date] | None:
     """Converteer een Altair-x-asselectie naar inclusieve kalenderdatums."""
 
-    if not isinstance(selection, dict):
+    if not isinstance(selection, Mapping):
         return None
 
     bounds = selection.get("x")
-    if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+    if isinstance(bounds, Mapping):
+        bounds = next(
+            (
+                bounds.get(key)
+                for key in ("value", "domain", "extent")
+                if bounds.get(key) is not None
+            ),
+            None,
+        )
+
+    if bounds is None:
+        bounds = selection.get("datum")
+
+    if (
+        not isinstance(bounds, (list, tuple))
+        or len(bounds) != 2
+        or any(isinstance(bound, (list, tuple, Mapping)) for bound in bounds)
+    ):
         return None
 
     parsed_dates: list[date] = []
@@ -250,35 +268,19 @@ def render_excluded_period_controls(
         "Periodes buiten beschouwing laten",
         expanded=bool(stored_periods),
     ):
+        if "excluded_period_start" not in st.session_state:
+            st.session_state["excluded_period_start"] = date.today()
+        if "excluded_period_end" not in st.session_state:
+            st.session_state["excluded_period_end"] = date.today()
+
         st.caption(
             "Periodes zijn inclusief begin- en einddatum. "
             "Metingen blijven zichtbaar in de grafiek, maar tellen "
             "niet mee voor uitschieterfiltering en GHG/GLG."
         )
 
-        manual_column1, manual_column2 = st.columns(2)
-        start_date = manual_column1.date_input(
-            "Begindatum",
-            value=date.today(),
-            key="excluded_period_start",
-        )
-        end_date = manual_column2.date_input(
-            "Einddatum",
-            value=date.today(),
-            key="excluded_period_end",
-        )
-
-        if st.button(
-            "Handmatige periode toevoegen",
-            key="add_manual_excluded_period",
-        ):
-            if start_date > end_date:
-                st.error("De begindatum moet op of vóór de einddatum liggen.")
-            else:
-                period = (start_date, end_date)
-                if period not in stored_periods:
-                    stored_periods.append(period)
-
+        chart_period: tuple[date, date] | None = None
+        chart_add_button_key: str | None = None
         if uploaded_files:
             st.markdown("**Of selecteer een periode in de grafiek**")
             st.caption(
@@ -290,6 +292,9 @@ def render_excluded_period_controls(
                 options=range(len(uploaded_files)),
                 format_func=lambda index: uploaded_files[index].name,
                 key="excluded_period_preview_file",
+            )
+            chart_add_button_key = (
+                f"add_chart_excluded_period_{file_index}"
             )
             selected_upload = uploaded_files[file_index]
 
@@ -340,26 +345,44 @@ def render_excluded_period_controls(
                     key=f"excluded_period_chart_{file_index}",
                 )
                 chart_state = chart_event.get("selection", {})
-                chart_period = chart_selection_period(
+                selected_chart_period = chart_selection_period(
                     chart_state.get("exclude_period")
-                    if isinstance(chart_state, dict)
+                    if isinstance(chart_state, Mapping)
                     else None
+                )
+                cached_period_key = (
+                    f"excluded_period_chart_selection_{file_index}"
+                )
+                if selected_chart_period is not None:
+                    st.session_state[cached_period_key] = (
+                        selected_chart_period
+                    )
+                chart_period = selected_chart_period or st.session_state.get(
+                    cached_period_key
                 )
 
                 if chart_period is not None:
+                    applied_selection_key = (
+                        f"excluded_period_applied_selection_{file_index}"
+                    )
+                    if st.session_state.get(
+                        applied_selection_key
+                    ) != chart_period:
+                        st.session_state["excluded_period_start"] = (
+                            chart_period[0]
+                        )
+                        st.session_state["excluded_period_end"] = (
+                            chart_period[1]
+                        )
+                        st.session_state[applied_selection_key] = (
+                            chart_period
+                        )
                     st.caption(
                         "Geselecteerd: "
                         f"{chart_period[0]:%d-%m-%Y} t/m "
                         f"{chart_period[1]:%d-%m-%Y}"
                     )
 
-                if st.button(
-                    "Geselecteerde periode toevoegen",
-                    disabled=chart_period is None,
-                    key=f"add_chart_excluded_period_{file_index}",
-                ) and chart_period is not None:
-                    if chart_period not in stored_periods:
-                        stored_periods.append(chart_period)
             except Exception as exc:
                 st.warning(
                     f"De meetreeks kan niet voor selectie worden getoond: {exc}"
@@ -368,6 +391,35 @@ def render_excluded_period_controls(
             st.info(
                 "Upload eerst een CSV om periodes via een grafiek te selecteren."
             )
+
+        manual_column1, manual_column2 = st.columns(2)
+        start_date = manual_column1.date_input(
+            "Begindatum",
+            key="excluded_period_start",
+        )
+        end_date = manual_column2.date_input(
+            "Einddatum",
+            key="excluded_period_end",
+        )
+
+        if st.button(
+            "Handmatige periode toevoegen",
+            key="add_manual_excluded_period",
+        ):
+            if start_date > end_date:
+                st.error("De begindatum moet op of vóór de einddatum liggen.")
+            else:
+                period = (start_date, end_date)
+                if period not in stored_periods:
+                    stored_periods.append(period)
+
+        if chart_add_button_key is not None and st.button(
+            "Geselecteerde periode toevoegen",
+            disabled=chart_period is None,
+            key=chart_add_button_key,
+        ) and chart_period is not None:
+            if chart_period not in stored_periods:
+                stored_periods.append(chart_period)
 
         if stored_periods:
             st.markdown("**Uitgesloten periodes**")
